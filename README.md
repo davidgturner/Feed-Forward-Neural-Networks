@@ -8,3 +8,8 @@ feed forward neural network approach for sentiment classification
 
 For PyTorch:
 ``` pip3 install torch torchvision torchaudio ```
+
+# How to run
+
+``` python optimization.py --lr 1  ```
+``` python neural_sentiment_classifier.py --model TRIVIAL --no_run_on_test ```
