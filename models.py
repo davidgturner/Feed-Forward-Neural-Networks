@@ -7,6 +7,22 @@ import numpy as np
 import random
 from sentiment_data import *
 
+class FeedForwardTextClassificationModel(nn.Module):
+
+    def __init__(self, vocabulary_size, embedding_dimension, num_classes):
+        super(FeedForwardTextClassificationModel, self).__init__()
+
+        # embedding layer
+        self.embedding = nn.Embedding(vocabulary_size, embedding_dimension)
+        
+        # linear layer for prediction
+        self.fc = nn.Linear(embedding_dimension, num_classes)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        x = x.mean(dim=1)
+        return self.log_softmax(self.fc(x), dim=1)
+
 
 class SentimentClassifier(object):
     """
@@ -68,5 +84,55 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
     and return an instance of that for the typo setting if you want; you're allowed to return two different model types
     for the two settings.
     """
-    raise NotImplementedError
+    # convert words to indices.
+    train_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in train_exs]
+    train_labels = [ex.label for ex in train_exs]
+
+    dev_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in dev_exs]
+    dev_labels = [ex.label for ex in dev_exs]
+
+    vocab_size = len(word_embeddings.vectors)
+    embedding_dim = word_embeddings.get_embedding_length()
+
+    # instantiate model
+    model = FeedForwardTextClassificationModel(vocabulary_size=vocab_size, embedding_dimension=embedding_dim, num_classes=2)
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    # train the model
+    for epoch in range(args.epochs):
+        total_loss = 0
+        model.train()
+        for words, label in zip(train_indices, train_labels):
+            optimizer.zero_grad()
+            
+            inputs = torch.tensor(words).long()
+            label = torch.tensor([label]).long()
+            
+            log_probs = model(inputs)
+            
+            loss = criterion(log_probs, label)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+
+        # evaluate on dev set
+        model.eval()
+        correct = 0
+        with torch.no_grad():
+            for words, label in zip(dev_indices, dev_labels):
+                inputs = torch.tensor(words).long()
+                label = torch.tensor([label]).long()
+                
+                log_probs = model(inputs)
+                _, predicted = torch.max(log_probs, 1)
+                
+                if predicted.item() == label.item():
+                    correct += 1
+
+        accuracy = correct / len(dev_exs)
+        print(f"Epoch {epoch+1}/{args.epochs}, Loss: {total_loss}, Dev Accuracy: {accuracy}")
+
+    return NeuralSentimentClassifier(model)
 
