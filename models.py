@@ -144,8 +144,6 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
         for idx in ex_indices:
             x = form_input(train_xs[idx])
             y = train_ys[idx]
-            #x = torch.tensor(words).long()
-            #y = torch.tensor([label]).long()
 
             # Build one-hot representation of y. Instead of the label 0 or 1, y_onehot is either [0, 1] or [1, 0]. This
             # way we can take the dot product directly with a probability vector to get class probabilities.
@@ -175,7 +173,7 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
               repr(prediction) + " with probs " + repr(probs))
     print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
 
-    return NeuralSentimentClassifier(model)
+    return NeuralSentimentClassifier(model, word_embeddings)
     
     # # convert words to indices.
     # train_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in train_exs]
