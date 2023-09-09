@@ -8,6 +8,12 @@ import numpy as np
 import random
 from sentiment_data import *
 from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader, TensorDataset
+
+import nltk
+from nltk.corpus import words, reuters
+from collections import Counter
 
 UNK = 1
 PAD = 0
@@ -24,69 +30,43 @@ class FFNN(nn.Module):
         for param in self.embedding.parameters():
             param.requires_grad = False
 
-        # add a dropout layer
-        drop_out_rate = 0.35  # drop out rate of the dropout layer
-        self.dropout = nn.Dropout(drop_out_rate)
+        # Dropout rate
+        drop_out_rate = 0.25
 
-        self.g = nn.ReLU()  # activation function
-        self.W = nn.Linear(embedding_dimension, num_classes)  # prediction layer after averaging embeddings
-        self.log_softmax = nn.LogSoftmax(dim=1)  # output log probabilities over class labels
+        # First dropout layer after averaging embeddings
+        self.dropout1 = nn.Dropout(drop_out_rate)
+
+        # Hidden layer 1
+        self.hidden1 = nn.Linear(embedding_dimension, 150)
+        nn.init.xavier_uniform_(self.hidden1.weight)  # Xavier Glorot weight initialization
+
+        # Activation function
+        self.g = nn.ReLU()
+
+        # Second dropout layer after first hidden layer
+        self.dropout2 = nn.Dropout(drop_out_rate)
+
+        # Prediction layer after the hidden layer
+        self.W = nn.Linear(150, num_classes)
         nn.init.xavier_uniform_(self.W.weight)  # Xavier Glorot weight initialization
 
-    # def __masked_mean(self, x, mask):
-    #     """
-    #     Compute mean embeddings in the presence of padding
-    #     x: tensor of embeddings (batch_size x seq_len x embed_dim)
-    #     mask: tensor indicating presence of padding (batch_size x seq_len); 1 for real words, 0 for pads
-    #     """
-    #     sum_embeddings = torch.sum(x, dim=1)  # Sum embeddings across the sequence length dimension
-    #     num_words = torch.sum(mask, dim=1, keepdim=True)  # Count the number of real words (non-padding)
-    #     return sum_embeddings / num_words  # Average by dividing the sum by the count of real words
+        # Output log probabilities over class labels
+        self.log_softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         if len(x.shape) == 1:
             x = x.unsqueeze(0)
 
-        # Handle unknown words
+        # handle any unknown words
         x[x == -1] = UNK  # Assuming 1 is the index of the UNK token
 
-        # for debugging
-        out_of_range_indices = x[x >= self.embedding.weight.size(0)]
-        if len(out_of_range_indices) > 0:
-            print("Out of range indices detected:", out_of_range_indices)
-
-        # ensures that only the real word embeddings are considered when computing the average.
-        #mask = (x != 0).float()  # Assuming 0 is the PAD index
         x = self.embedding(x)
-        #x = self.__masked_mean(x, mask)  # averaging embeddings
-
-        # print("Shape after masked mean:", x.shape)
-
-        # print("Shape before mean:", x.shape)
         x = x.mean(dim=1)  # averaging embeddings
-        # print("Shape after mean:", x.shape)
-
-        x = self.dropout(x)  # dropout before activation
-        x = self.g(self.W(x))  # activation function
+        x = self.dropout1(x)  # dropout after averaging
+        x = self.g(self.hidden1(x))  # activation after first hidden layer
+        x = self.dropout2(x)  # dropout after first hidden layer
+        x = self.W(x)  # linear layer before softmax
         return self.log_softmax(x)
-
-    # def forward(self, x):
-    #     # Handle unknown words
-    #     x[x == -1] = 1  # Assuming 1 is the index of the UNK token
-
-    #     # Add batch dimension
-    #     # x = x.unsqueeze(0)
-
-    #     # Debug: print out-of-range indices
-    #     out_of_range_indices = x[x >= self.embedding.weight.size(0)]
-    #     if len(out_of_range_indices) > 0:
-    #         print("Out of range indices detected:", out_of_range_indices)
-
-    #     x = self.embedding(x)
-    #     x = x.mean(dim=1)  # averaging embeddings
-    #     x = self.g(x)  # activation function
-    #     x = self.dropout(x)  # dropout after activation
-    #     return self.log_softmax(self.W(x))
 
 
 class SentimentClassifier(object):
@@ -125,12 +105,7 @@ class TrivialSentimentClassifier(SentimentClassifier):
         """
         return 1
 
-
-import nltk
-from nltk.corpus import words, reuters
-from collections import Counter
-
-class CustomSpellChecker:
+class SpellChecker:
     def __init__(self):
         nltk.download('reuters')
         self.word_freqs = Counter(reuters.words())
@@ -167,7 +142,7 @@ class NeuralSentimentClassifier(SentimentClassifier):
     def __init__(self, ffnn, word_embeddings):
         self.ffnn = ffnn
         self.word_embeddings = word_embeddings
-        self.spell_checker = CustomSpellChecker()
+        self.spell_checker = SpellChecker()
     
     def predict(self, ex_words, has_typos):
         if has_typos:
@@ -177,18 +152,12 @@ class NeuralSentimentClassifier(SentimentClassifier):
         device = next(self.ffnn.parameters()).device
         ex_tensor = ex_tensor.to(device)
 
-        #ex_tensor = ex_tensor.to(device=self.ffnn.device) 
-        # logits = self.ffnn(ex_tensor.unsqueeze(0))
         logits = self.ffnn.forward(ex_tensor.unsqueeze(0))
 
         return torch.argmax(logits).item()
 
 def form_input(x) -> torch.Tensor:
     return x.long()
-
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, TensorDataset
-
 
 def pad_collate(batch):
     (xx, yy) = zip(*batch)
@@ -204,15 +173,16 @@ def pad_tensor(tensor_list, pad=0):
         out_tensor[i, :length] = tensor
     return out_tensor
 
+TARGET_DEV_ACCURACY = 0.77
+    
 def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
     
     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
     train_ys = torch.tensor([ex.label for ex in train_exs])
     
     padded_train_xs = pad_tensor(train_xs)
-    
 
-    spell_checker = CustomSpellChecker()
+    spell_checker = SpellChecker()
 
     vocab_size = len(word_embeddings.vectors)
     embedding_dim = word_embeddings.get_embedding_length()
@@ -223,17 +193,14 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
     criterion = nn.NLLLoss()
 
     best_dev_accuracy = 0
-    patience = 5  # # of epochs to wait for improvement
+    epoch_improvement_waiting_period = 3
     wait = 0
 
-    # train_dataset = TensorDataset(torch.stack(train_xs), train_ys)
     train_dataset = TensorDataset(padded_train_xs, train_ys)
-    # train_loader = DataLoader(train_dataset, shuffle=True, batch_size=1) # Assuming batch size of 1 for simplicity
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=pad_collate)
 
     for epoch in range(0, args.num_epochs):
         total_loss = 0.0
-        #for idx, x in enumerate(train_xs):
         for x, y in train_loader:
             if train_model_for_typo_setting:
                 corrected_words = [spell_checker.correct(word) for word in x]
@@ -247,7 +214,7 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
             optimizer.step()
         print(f"Epoch {epoch}, Loss: {total_loss}")
 
-        # Evaluate on Dev Set
+        # evaluate the dev set
         dev_correct = 0
         for ex in dev_exs:
             words = [word for word in ex.words]
@@ -269,25 +236,22 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
             wait = 0
         else:
             wait += 1
-            if wait > patience:
+            if wait > epoch_improvement_waiting_period or best_dev_accuracy >= TARGET_DEV_ACCURACY:
                 print("Early stopping triggered.")
                 break
 
-    # Use best model for further tasks
+    # use the best model
     ffnn = best_model
     train_correct = 0
     for idx in range(0, len(train_xs)):
         x = form_input(train_xs[idx])
         y = train_ys[idx]
 
-        print("shape before the forward call: ", x.shape)
         log_probs = ffnn.forward(x)
 
         prediction = torch.argmax(log_probs)
         if y == prediction:
             train_correct += 1
-        #print("Example " + repr(train_xs[idx]) + "; gold = " + repr(train_ys[idx]) + "; pred = " +\
-        #      repr(prediction) + " with probs " + repr(probs))
     
     print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
 
