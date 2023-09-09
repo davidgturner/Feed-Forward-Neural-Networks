@@ -6,34 +6,36 @@ from torch import optim
 import numpy as np
 import random
 from sentiment_data import *
+from torch.nn.utils.rnn import pad_sequence
 
 class FFNN(nn.Module):
 
-    def __init__(self, vocabulary_size, embedding_dimension, num_classes):
+    def __init__(self, vocabulary_size, embedding_dimension, num_classes, word_embeddings):
         super(FFNN, self).__init__()
 
-        #  embedding layer
-        # TODO - do some averaging as this is a deep averaging network (bag of vectors)
-        self.embedding = nn.Embedding(vocabulary_size, embedding_dimension)
-        
-        # linear layer for prediction
-        # self.fc = nn.Linear(embedding_dimension, num_classes)
+        # embedding layer will convert word indices into their respective embeddings.
+        # embeddings for each sequence will be averaged.
+        # averaged embedding will be passed through your feed-forward layers.
+        self.embedding = word_embeddings.get_initialized_embedding_layer()
 
-        # input is from last layer
-        self.V = nn.Linear(vocabulary_size, embedding_dimension)
-        self.g = nn.ReLU() # nn.Tanh()
-        self.W = nn.Linear(embedding_dimension, num_classes)
-        self.log_softmax = nn.LogSoftmax(dim=0)
-        # Initialize weights according to a formula due to Xavier Glorot.
-        nn.init.xavier_uniform_(self.V.weight)
-        nn.init.xavier_uniform_(self.W.weight)
+        # freeze embeddings
+        for param in self.embedding.parameters():
+            param.requires_grad = False
+
+        self.g = nn.ReLU() # activation function
+        self.W = nn.Linear(embedding_dimension, num_classes)  # linear layer for prediction after averaging embeddings
+        self.log_softmax = nn.LogSoftmax(dim=1)  # output log probabilities over class labels
+        nn.init.xavier_uniform_(self.W.weight)  # Initialize weights according to a formula due to Xavier Glorot.
 
     def forward(self, x):
+        print("FFNN forward - type ", x.dtype)
+        print("x shape before embedding layer call ", x.shape)
         x = self.embedding(x)
-        x = x.mean(dim=1)
-        return self.log_softmax(self.fc(x), dim=1)
-        # return self.log_softmax(self.W(self.g(self.V(x))))
-        # return self.log_softmax(self.W(self.g(self.V(x))))
+        print("x shape after embedding layer call ", x.shape)
+        x = x.mean(dim=1)  # averaging embeddings
+        x = x.view(x.size(0), -1)
+        x = self.g(x)
+        return self.log_softmax(self.W(x))
 
 
 class SentimentClassifier(object):
@@ -89,78 +91,66 @@ class NeuralSentimentClassifier(SentimentClassifier):
         raise NotImplementedError
 
 def form_input(x) -> torch.Tensor:
-    """
-    Form the input to the neural network. In general this may be a complex function that synthesizes multiple pieces
-    of data, does some computation, handles batching, etc.
-
-    :param x: a [num_samples x inp] numpy array containing input data
-    :return: a [num_samples x inp] Tensor
-    """
-    return torch.from_numpy(x).float()
+    return x.long()
 
 def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
                                  word_embeddings: WordEmbeddings, train_model_for_typo_setting: bool) -> NeuralSentimentClassifier:
-    """
-    :param args: Command-line args so you can access them here
-    :param train_exs: training examples
-    :param dev_exs: development set, in case you wish to evaluate your model during training
-    :param word_embeddings: set of loaded word embeddings
-    :param train_model_for_typo_setting: True if we should train the model for the typo setting, False otherwise
-    :return: A trained NeuralSentimentClassifier model. Note: you can create an additional subclass of SentimentClassifier
-    and return an instance of that for the typo setting if you want; you're allowed to return two different model types
-    for the two settings.
-    """
-    # Synthetic data for XOR: y = x0 XOR x1
-    #train_xs = np.array([[0, 0], [0, 1], [0, 1], [1, 0], [1, 0], [1, 1]], dtype=np.float32)
-    #train_ys = np.array([0, 1, 1, 1, 1, 0], dtype=np.float32)
+    
+    vocabulary_size = len(word_embeddings.vectors)
+    train_xs = []
+    # words with an index of -1 are out-of-vocabulary (OOV) words.
+    # UNK (Unknown) token is to handle such OOV words.
+    UNK_INDEX = 1
 
-    train_xs = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in train_exs]
-    train_xs = np.array([train_xs])
+    train_xs = []
+    for ex in train_exs:
+        indices = []
+        for word in ex.words:
+            idx = word_embeddings.word_indexer.index_of(word)
+            if idx == -1: # OOV word
+                idx = UNK_INDEX
+            indices.append(idx)
+        train_xs.append(torch.tensor(indices))
 
-    train_ys = [ex.label for ex in train_exs]
-    train_ys = np.array([train_ys])
+    # train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
+    train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
+    train_xs_padded = pad_sequence(train_xs, batch_first=True)
 
-    # dev_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in dev_exs]
-    # dev_labels = [ex.label for ex in dev_exs]
+    train_ys = torch.tensor([ex.label for ex in train_exs])
 
-    # Define some constants
-    # Inputs are of size 2
-    feat_vec_size = 2
-    # Let's use 10 hidden units
     embedding_size = 10
-    # We're using 2 classes. What's presented here is multi-class code that can scale to more classes, though
-    # slightly more compact code for the binary case is possible.
     num_classes = 2
-
-    # RUN TRAINING AND TEST
     num_epochs = 100
-    ffnn = FFNN(feat_vec_size, embedding_size, num_classes)
+    
+    ffnn = FFNN(vocabulary_size, embedding_size, num_classes, word_embeddings)
+
     initial_learning_rate = 0.1
+
+    # define Adam optimizer
     optimizer = optim.Adam(ffnn.parameters(), lr=initial_learning_rate)
+
+    # NLLLoss expects log probabilities and model provides them with nn.LogSoftmax
+    criterion = nn.NLLLoss()
+    
     for epoch in range(0, num_epochs):
-        ex_indices = [i for i in range(0, len(train_xs))]
+        ex_indices = list(range(len(train_xs_padded)))
         random.shuffle(ex_indices)
         total_loss = 0.0
         for idx in ex_indices:
-            x = form_input(train_xs[idx])
+            x = form_input(train_xs_padded[idx])
             y = train_ys[idx]
 
-            # Build one-hot representation of y. Instead of the label 0 or 1, y_onehot is either [0, 1] or [1, 0]. This
-            # way we can take the dot product directly with a probability vector to get class probabilities.
-            y_onehot = torch.zeros(num_classes)
-            # scatter will write the value of 1 into the position of y_onehot given by y
-            y_onehot.scatter_(0, torch.from_numpy(np.asarray(y,dtype=np.int64)), 1)
-            # Zero out the gradients from the FFNN object. *THIS IS VERY IMPORTANT TO DO BEFORE CALLING BACKWARD()*
             ffnn.zero_grad()
+
+            print(torch.max(x))  # check if there's any value in x that is equal to or greater than your vocabulary_size. This will directly lead to the index out of range error.
             probs = ffnn.forward(x)
-            # Can also use built-in NLLLoss as a shortcut here but we're being explicit here
-            loss = torch.neg(probs).dot(y_onehot)
+
+            loss = criterion(probs, y)
+
             total_loss += loss
-            # Computes the gradient and takes the optimizer step
             loss.backward()
             optimizer.step()
         print("Total loss on epoch %i: %f" % (epoch, total_loss))
-    # Evaluate on the train set
     train_correct = 0
     for idx in range(0, len(train_xs)):
         x = form_input(train_xs[idx])
@@ -174,58 +164,3 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
     print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
 
     return NeuralSentimentClassifier(model, word_embeddings)
-    
-    # # convert words to indices.
-    # train_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in train_exs]
-    # train_labels = [ex.label for ex in train_exs]
-
-    # dev_indices = [[word_embeddings.get_embedding(word) for word in ex.words] for ex in dev_exs]
-    # dev_labels = [ex.label for ex in dev_exs]
-
-    # vocab_size = len(word_embeddings.vectors)
-    # embedding_dim = word_embeddings.get_embedding_length()
-
-    # # instantiate model
-    # model = FeedForwardTextClassificationModel(vocabulary_size=vocab_size, embedding_dimension=embedding_dim, num_classes=2)
-    # criterion = torch.nn.CrossEntropyLoss()
-    # optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    # # train the model
-    # for epoch in range(args.num_epochs):
-    #     total_loss = 0
-    #     model.train()
-    #     for words, label in zip(train_indices, train_labels):
-    #         optimizer.zero_grad()
-            
-    #         inputs = torch.tensor(words).long()
-    #         label = torch.tensor([label]).long()
-            
-    #         # log_probs = model(inputs)
-    #         model.zero_grad()
-    #         log_probs = model.forward(inputs)
-            
-    #         loss = criterion(log_probs, label)
-    #         loss.backward()
-    #         optimizer.step()
-            
-    #         total_loss += loss.item()
-
-    #     # evaluate on dev set
-    #     model.eval()
-    #     correct = 0
-    #     with torch.no_grad():
-    #         for words, label in zip(dev_indices, dev_labels):
-    #             inputs = torch.tensor(words).long()
-    #             label = torch.tensor([label]).long()
-                
-    #             log_probs = model(inputs)
-    #             _, predicted = torch.max(log_probs, 1)
-                
-    #             if predicted.item() == label.item():
-    #                 correct += 1
-
-    #     accuracy = correct / len(dev_exs)
-    #     print(f"Epoch {epoch+1}/{args.num_epochs}, Loss: {total_loss}, Dev Accuracy: {accuracy}")
-
-    # return NeuralSentimentClassifier(model)
-
