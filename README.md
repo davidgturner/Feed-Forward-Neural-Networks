@@ -13,4 +13,4 @@ For PyTorch:
 
 ``` python optimization.py --lr 1  ```
 ``` python neural_sentiment_classifier.py --model TRIVIAL --no_run_on_test ```
-``` python neural_sentiment_classifier.py --word_vecs_path data/glove.6B.300d-relativized.txt --epochs 10```
+``` python neural_sentiment_classifier.py --word_vecs_path data/glove.6B.300d-relativized.txt --epochs 10 ```
