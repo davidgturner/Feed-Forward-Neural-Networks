@@ -13,27 +13,32 @@ class FFNN(nn.Module):
     def __init__(self, vocabulary_size, embedding_dimension, num_classes, word_embeddings):
         super(FFNN, self).__init__()
 
-        # embedding layer will convert word indices into their respective embeddings.
-        # embeddings for each sequence will be averaged.
-        # averaged embedding will be passed through your feed-forward layers.
+        # Embedding layer
         self.embedding = word_embeddings.get_initialized_embedding_layer()
 
-        # freeze embeddings
+        # Freeze embeddings
         for param in self.embedding.parameters():
             param.requires_grad = False
 
-        self.g = nn.ReLU() # activation function
-        self.W = nn.Linear(embedding_dimension, num_classes)  # linear layer for prediction after averaging embeddings
+        self.g = nn.ReLU()  # activation function
+        self.W = nn.Linear(embedding_dimension, num_classes)  # prediction layer after averaging embeddings
         self.log_softmax = nn.LogSoftmax(dim=1)  # output log probabilities over class labels
-        nn.init.xavier_uniform_(self.W.weight)  # Initialize weights according to a formula due to Xavier Glorot.
+        nn.init.xavier_uniform_(self.W.weight)  # Xavier Glorot weight initialization
 
     def forward(self, x):
-        print("FFNN forward - type ", x.dtype)
-        print("x shape before embedding layer call ", x.shape)
+        # Handle unknown words
+        x[x == -1] = 1  # Assuming 1 is the index of the UNK token
+
+        # Add batch dimension
+        x = x.unsqueeze(0)
+
+        # Debug: print out-of-range indices
+        out_of_range_indices = x[x >= self.embedding.weight.size(0)]
+        if len(out_of_range_indices) > 0:
+            print("Out of range indices detected:", out_of_range_indices)
+
         x = self.embedding(x)
-        print("x shape after embedding layer call ", x.shape)
         x = x.mean(dim=1)  # averaging embeddings
-        x = x.view(x.size(0), -1)
         x = self.g(x)
         return self.log_softmax(self.W(x))
 
@@ -75,6 +80,37 @@ class TrivialSentimentClassifier(SentimentClassifier):
         return 1
 
 
+import nltk
+from nltk.corpus import words, reuters
+from collections import Counter
+
+class CustomSpellChecker:
+    def __init__(self):
+        nltk.download('reuters')
+        self.word_freqs = Counter(reuters.words())
+        self.alphabet = 'abcdefghijklmnopqrstuvwxyz'
+        self.known_words = set(words.words())
+
+    def __edits(self, word):
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R)>1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in self.alphabet]
+        inserts = [L + c + R for L, R in splits for c in self.alphabet]
+        return set(deletes + transposes + replaces + inserts)
+
+    def __get_known_words(self, words):
+        return set(word for word in words if word in self.known_words)
+
+    def correct(self, word):
+        if word in self.known_words:
+            return word
+        candidates = self.__get_known_words(self.__edits(word))
+        if candidates:
+            return max(candidates, key=self.word_freqs.get)
+        return word
+
+
 class NeuralSentimentClassifier(SentimentClassifier):
     """
     Implement your NeuralSentimentClassifier here. This should wrap an instance of the network with learned weights
@@ -82,75 +118,62 @@ class NeuralSentimentClassifier(SentimentClassifier):
     method and you can optionally override predict_all if you want to use batching at inference time (not necessary,
     but may make things faster!)
     """
-    def __init__(self, ffnn , word_embedding):
+    def __init__(self, ffnn, word_embeddings):
         self.ffnn = ffnn
-        self.word_embedding = word_embedding
+        self.word_embeddings = word_embeddings
+        self.spell_checker = CustomSpellChecker()
     
-    def predict(self, x):
-        # TODO - should look like old proj
-        raise NotImplementedError
+    def predict(self, ex_words, has_typos):
+        if has_typos:
+            ex_words = [self.spell_checker.correct(word) for word in ex_words]
+        ex_tensor = torch.tensor([self.word_embeddings.word_indexer.index_of(word) for word in ex_words])
+        
+        device = next(self.ffnn.parameters()).device
+        ex_tensor = ex_tensor.to(device)
+
+        #ex_tensor = ex_tensor.to(device=self.ffnn.device) 
+        logits = self.ffnn(ex_tensor.unsqueeze(0))
+        return torch.argmax(logits).item()
 
 def form_input(x) -> torch.Tensor:
     return x.long()
 
-def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
-                                 word_embeddings: WordEmbeddings, train_model_for_typo_setting: bool) -> NeuralSentimentClassifier:
-    
-    vocabulary_size = len(word_embeddings.vectors)
-    train_xs = []
-    # words with an index of -1 are out-of-vocabulary (OOV) words.
-    # UNK (Unknown) token is to handle such OOV words.
-    UNK_INDEX = 1
-
-    train_xs = []
-    for ex in train_exs:
-        indices = []
-        for word in ex.words:
-            idx = word_embeddings.word_indexer.index_of(word)
-            if idx == -1: # OOV word
-                idx = UNK_INDEX
-            indices.append(idx)
-        train_xs.append(torch.tensor(indices))
-
-    # train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
+def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
-    train_xs_padded = pad_sequence(train_xs, batch_first=True)
-
     train_ys = torch.tensor([ex.label for ex in train_exs])
 
-    embedding_size = 10
+    vocab_size = len(word_embeddings.vectors)
+    embedding_dim = word_embeddings.get_embedding_length()
+
     num_classes = 2
-    num_epochs = 100
-    
-    ffnn = FFNN(vocabulary_size, embedding_size, num_classes, word_embeddings)
+    ffnn = FFNN(vocab_size, embedding_dim, num_classes, word_embeddings)
+    optimizer = torch.optim.Adam(ffnn.parameters())
 
-    initial_learning_rate = 0.1
-
-    # define Adam optimizer
-    optimizer = optim.Adam(ffnn.parameters(), lr=initial_learning_rate)
-
-    # NLLLoss expects log probabilities and model provides them with nn.LogSoftmax
     criterion = nn.NLLLoss()
-    
-    for epoch in range(0, num_epochs):
-        ex_indices = list(range(len(train_xs_padded)))
-        random.shuffle(ex_indices)
+
+    for epoch in range(0, args.num_epochs):
         total_loss = 0.0
-        for idx in ex_indices:
-            x = form_input(train_xs_padded[idx])
-            y = train_ys[idx]
+        for idx, x in enumerate(train_xs):
+            x = form_input(x)
+            # y = train_ys[idx]
+            y = train_ys[idx].view(1)  # reshaping y to be 1D
+
+            # print(x.shape)  # debugging the shape
+            # print(y.shape)  # debugging the shape
 
             ffnn.zero_grad()
 
-            print(torch.max(x))  # check if there's any value in x that is equal to or greater than your vocabulary_size. This will directly lead to the index out of range error.
-            probs = ffnn.forward(x)
+            #print(x.shape)  # Should ideally be something like [batch_size, sequence_length]
+            #print(y.shape)  # Should ideally be [batch_size]
 
+            probs = ffnn(x)
             loss = criterion(probs, y)
-
-            total_loss += loss
             loss.backward()
+
+            total_loss += loss.item()
             optimizer.step()
-        print("Total loss on epoch %i: %f" % (epoch, total_loss))
+
+        print(f"Epoch {epoch}, Loss: {total_loss}")
     train_correct = 0
     for idx in range(0, len(train_xs)):
         x = form_input(train_xs[idx])
@@ -163,4 +186,4 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
               repr(prediction) + " with probs " + repr(probs))
     print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
 
-    return NeuralSentimentClassifier(model, word_embeddings)
+    return NeuralSentimentClassifier(ffnn, word_embeddings)
