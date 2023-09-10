@@ -8,7 +8,6 @@ import numpy as np
 import random
 from sentiment_data import *
 from torch.nn.utils.rnn import pad_sequence
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, TensorDataset
 
 import nltk
@@ -30,36 +29,27 @@ class FFNN(nn.Module):
         for param in self.embedding.parameters():
             param.requires_grad = False
 
-        # Dropout rate
-        drop_out_rate = 0.40
-
-        # First dropout layer after averaging embeddings
+        # dropout rate after averaging embeddings
+        drop_out_rate = 0.22
         self.dropout1 = nn.Dropout(drop_out_rate)
 
-        # Hidden layer 1
-        self.hidden1 = nn.Linear(embedding_dimension, 150)
-        nn.init.xavier_uniform_(self.hidden1.weight)  # Xavier Glorot weight initialization for hidden1
+        hidden_layer_size = 150
 
-        # Second dropout layer after first hidden layer
-        drop_out_rate = 0.30
+        # hidden layer
+        self.hidden = nn.Linear(embedding_dimension, hidden_layer_size)
+        nn.init.xavier_uniform_(self.hidden.weight)  # xavier glorot weight initialization for hidden layer
+
+        # dropout rate after hidden layer
         self.dropout2 = nn.Dropout(drop_out_rate)
 
-        # Hidden layer 2
-        self.hidden2 = nn.Linear(150, 75)
-        nn.init.xavier_uniform_(self.hidden2.weight)  # Xavier Glorot weight initialization for hidden2
+        # prediction layer after the hidden layer
+        self.W = nn.Linear(hidden_layer_size, num_classes)
+        nn.init.xavier_uniform_(self.W.weight)  # xavier glorot weight initialization for final linear layer
 
-        # Third dropout layer after second hidden layer
-        drop_out_rate = 0.20
-        self.dropout3 = nn.Dropout(drop_out_rate)
-
-        # Prediction layer after the hidden layers
-        self.W = nn.Linear(75, num_classes)
-        nn.init.xavier_uniform_(self.W.weight)  # Xavier Glorot weight initialization for final linear layer
-
-        # Activation function
+        # activation function
         self.g = nn.ReLU()
 
-        # Output log probabilities over class labels
+        # output log probabilities over class labels
         self.log_softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
@@ -67,19 +57,15 @@ class FFNN(nn.Module):
             x = x.unsqueeze(0)
 
         # handle any unknown words
-        x[x == -1] = UNK  # Assuming 1 is the index of the UNK token
+        x[x == -1] = UNK  # 1 is the index of the UNK token
 
         x = self.embedding(x)
         x = x.mean(dim=1)  # averaging embeddings
         x = self.dropout1(x)  # dropout after averaging
-        x = self.g(self.hidden1(x))  # activation after first hidden layer
-        x = self.dropout2(x)  # dropout after first hidden layer
-        x = self.g(self.hidden2(x))  # activation after second hidden layer
-        x = self.dropout3(x)  # dropout after second hidden layer
+        x = self.g(self.hidden(x))  # activation after hidden layer
+        x = self.dropout2(x)  # dropout after hidden layer
         x = self.W(x)  # linear layer before softmax
         return self.log_softmax(x)
-
-
 
 class SentimentClassifier(object):
     """
@@ -185,8 +171,6 @@ def pad_tensor(tensor_list, pad=0):
         out_tensor[i, :length] = tensor
     return out_tensor
 
-TARGET_DEV_ACCURACY = 0.77
-    
 def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
     
     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
@@ -201,7 +185,7 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
 
     num_classes = 2
     ffnn = FFNN(vocab_size, embedding_dim, num_classes, word_embeddings)
-    optimizer = torch.optim.Adam(ffnn.parameters())
+    optimizer = torch.optim.Adam(ffnn.parameters(), lr=args.lr)
     criterion = nn.NLLLoss()
 
     best_dev_accuracy = 0
@@ -241,7 +225,7 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
         dev_accuracy = dev_correct / len(dev_exs)
         print(f"Epoch {epoch}, Dev Accuracy: {dev_accuracy:.4f}")
 
-        # Check for early stopping
+        # check for early stopping
         if dev_accuracy > best_dev_accuracy:
             best_dev_accuracy = dev_accuracy
             best_model = copy.deepcopy(ffnn)
