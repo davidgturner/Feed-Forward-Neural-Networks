@@ -3,29 +3,18 @@
 import copy
 import torch
 import torch.nn as nn
-from torch import optim
-import numpy as np
-import random
 from sentiment_data import *
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, TensorDataset
 
 import nltk
-from nltk.corpus import words, reuters
-from collections import Counter
+from nltk.corpus import words
+from nltk.metrics.distance import edit_distance
+
+nltk.download('words')
 
 UNK = 1
 PAD = 0
-
-def download_nltk_data(resource):
-    try:
-        if not nltk.data.find(f"corpora/{resource}"):
-            nltk.download(resource)
-    except LookupError:
-        print(f"Error: Unable to download or locate the '{resource}' resource from NLTK.")
-
-download_nltk_data('words')
-download_nltk_data('reuters')
 
 class FFNN(nn.Module):
 
@@ -113,32 +102,6 @@ class TrivialSentimentClassifier(SentimentClassifier):
         """
         return 1
 
-class SpellChecker:
-    def __init__(self):
-        self.word_freqs = Counter(reuters.words())
-        self.alphabet = 'abcdefghijklmnopqrstuvwxyz'
-        self.known_words = set(words.words())
-
-    def __edits(self, word):
-        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
-        deletes = [L + R[1:] for L, R in splits if R]
-        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R)>1]
-        replaces = [L + c + R[1:] for L, R in splits if R for c in self.alphabet]
-        inserts = [L + c + R for L, R in splits for c in self.alphabet]
-        return set(deletes + transposes + replaces + inserts)
-
-    def __get_known_words(self, words):
-        return set(word for word in words if word in self.known_words)
-
-    def correct(self, word):
-        if word in self.known_words:
-            return word
-        candidates = self.__get_known_words(self.__edits(word))
-        if candidates:
-            return max(candidates, key=self.word_freqs.get)
-        return word
-
-
 class NeuralSentimentClassifier(SentimentClassifier):
     """
     Implement your NeuralSentimentClassifier here. This should wrap an instance of the network with learned weights
@@ -149,11 +112,18 @@ class NeuralSentimentClassifier(SentimentClassifier):
     def __init__(self, ffnn, word_embeddings):
         self.ffnn = ffnn
         self.word_embeddings = word_embeddings
-        self.spell_checker = SpellChecker()
+        self.wordlist = set(words.words())
     
+    def correct_spelling(self, word):
+        if word in self.wordlist:
+            return word
+        candidates = ((edit_distance(word, candidate), candidate) for candidate in self.wordlist if abs(len(word) - len(candidate)) <= 2)
+        return min(candidates, key=lambda x: x[0])[1]
+
     def predict(self, ex_words, has_typos):
         if has_typos:
-            ex_words = [self.spell_checker.correct(word) for word in ex_words]
+            ex_words = [correct_spelling(word) for word in ex_words]
+    
         ex_tensor = torch.tensor([self.word_embeddings.word_indexer.index_of(word) for word in ex_words])
         
         device = next(self.ffnn.parameters()).device
@@ -187,8 +157,6 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
     
     padded_train_xs = pad_tensor(train_xs)
 
-    spell_checker = SpellChecker()
-
     vocab_size = len(word_embeddings.vectors)
     embedding_dim = word_embeddings.get_embedding_length()
 
@@ -207,10 +175,6 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
     for epoch in range(0, args.num_epochs):
         total_loss = 0.0
         for x, y in train_loader:
-            if train_model_for_typo_setting:
-                corrected_words = [spell_checker.correct(word) for word in x]
-                x = torch.tensor([word_embeddings.word_indexer.index_of(word) for word in corrected_words])
-            
             ffnn.zero_grad()
             probs = ffnn(x)
             loss = criterion(probs, y)
@@ -223,8 +187,6 @@ def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: Word
         dev_correct = 0
         for ex in dev_exs:
             words = [word for word in ex.words]
-            if train_model_for_typo_setting:
-                words = [spell_checker.correct(word) for word in words]
             x = torch.tensor([word_embeddings.word_indexer.index_of(word) for word in words]).unsqueeze(0)
             y = ex.label
             log_probs = ffnn(x)
