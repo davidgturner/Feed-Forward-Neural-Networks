@@ -17,6 +17,16 @@ from collections import Counter
 UNK = 1
 PAD = 0
 
+def download_nltk_data(resource):
+    try:
+        if not nltk.data.find(f"corpora/{resource}"):
+            nltk.download(resource)
+    except LookupError:
+        print(f"Error: Unable to download or locate the '{resource}' resource from NLTK.")
+
+download_nltk_data('words')
+download_nltk_data('reuters')
+
 class FFNN(nn.Module):
 
     def __init__(self, vocabulary_size, embedding_dimension, num_classes, word_embeddings):
@@ -105,7 +115,6 @@ class TrivialSentimentClassifier(SentimentClassifier):
 
 class SpellChecker:
     def __init__(self):
-        nltk.download('reuters')
         self.word_freqs = Counter(reuters.words())
         self.alphabet = 'abcdefghijklmnopqrstuvwxyz'
         self.known_words = set(words.words())
