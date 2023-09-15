@@ -13,3 +13,4 @@ For PyTorch:
 
 ``` python optimization.py ```
 ``` python neural_sentiment_classifier.py --word_vecs_path data/glove.6B.300d-relativized.txt ```
+``` python neural_sentiment_classifier.py --word_vecs_path data/glove.6B.300d-relativized.txt --use_typo_setting ```

@@ -8,17 +8,18 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, TensorDataset
 
 import nltk
-from nltk.corpus import words
+from nltk.corpus import words, movie_reviews
 from nltk.metrics.distance import edit_distance
 
-nltk.download('words')
+nltk.download('words', quiet=True)
+nltk.download('movie_reviews', quiet=True)
 
 UNK = 1
 PAD = 0
 
 class FFNN(nn.Module):
 
-    def __init__(self, vocabulary_size, embedding_dimension, num_classes, word_embeddings):
+    def __init__(self, embedding_dimension, num_classes, word_embeddings):
         super(FFNN, self).__init__()
 
         # the first layer is the embedding layer
@@ -29,17 +30,15 @@ class FFNN(nn.Module):
             param.requires_grad = False
 
         # dropout rate after averaging embeddings
-        drop_out_rate = 0.22
-        self.dropout1 = nn.Dropout(drop_out_rate)
-
-        hidden_layer_size = 150
+        drop_out_rate = 0.175
 
         # hidden layer
+        hidden_layer_size = 225
         self.hidden = nn.Linear(embedding_dimension, hidden_layer_size)
         nn.init.xavier_uniform_(self.hidden.weight)  # xavier glorot weight initialization for hidden layer
 
         # dropout rate after hidden layer
-        self.dropout2 = nn.Dropout(drop_out_rate)
+        self.dropout1 = nn.Dropout(drop_out_rate)
 
         # prediction layer after the hidden layer
         self.W = nn.Linear(hidden_layer_size, num_classes)
@@ -60,9 +59,8 @@ class FFNN(nn.Module):
 
         x = self.embedding(x)
         x = x.mean(dim=1)  # averaging embeddings
-        x = self.dropout1(x)  # dropout after averaging
         x = self.g(self.hidden(x))  # activation after hidden layer
-        x = self.dropout2(x)  # dropout after hidden layer
+        x = self.dropout1(x)  # dropout after hidden layer
         x = self.W(x)  # linear layer before softmax
         return self.log_softmax(x)
 
@@ -102,6 +100,30 @@ class TrivialSentimentClassifier(SentimentClassifier):
         """
         return 1
 
+class SpellChecker:
+    def __init__(self, words = set(movie_reviews.words())):
+        self.known_words = words
+        self.alphabet = 'abcdefghijklmnopqrstuvwxyz'
+
+    def __edits(self, word):
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R)>1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in self.alphabet]
+        inserts = [L + c + R for L, R in splits for c in self.alphabet]
+        return set(deletes + transposes + replaces + inserts)
+
+    def __get_known_words(self, words):
+        return set(word for word in words if word in self.known_words)
+
+    def correct(self, word):
+        if word in self.known_words:
+            return word
+        candidates = self.__get_known_words(self.__edits(word))
+        if candidates:
+            return next(iter(candidates))
+        return word
+    
 class NeuralSentimentClassifier(SentimentClassifier):
     """
     Implement your NeuralSentimentClassifier here. This should wrap an instance of the network with learned weights
@@ -112,17 +134,12 @@ class NeuralSentimentClassifier(SentimentClassifier):
     def __init__(self, ffnn, word_embeddings):
         self.ffnn = ffnn
         self.word_embeddings = word_embeddings
-        self.wordlist = set(words.words())
-    
-    def correct_spelling(self, word):
-        if word in self.wordlist:
-            return word
-        candidates = ((edit_distance(word, candidate), candidate) for candidate in self.wordlist if abs(len(word) - len(candidate)) <= 2)
-        return min(candidates, key=lambda x: x[0])[1]
+        self.wordlist = set(movie_reviews.words())
+        self.spell_checker = SpellChecker(self.wordlist)
 
     def predict(self, ex_words, has_typos):
         if has_typos:
-            ex_words = [correct_spelling(word) for word in ex_words]
+            ex_words = [self.spell_checker.correct(word) for word in ex_words]
     
         ex_tensor = torch.tensor([self.word_embeddings.word_indexer.index_of(word) for word in ex_words])
         
@@ -150,18 +167,24 @@ def pad_tensor(tensor_list, pad=0):
         out_tensor[i, :length] = tensor
     return out_tensor
 
+spell_checker = SpellChecker()
+
 def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
     
+    # If train_model_for_typo_setting is True, we spell-correct the words in train_exs
+    if train_model_for_typo_setting:
+        for ex in train_exs:
+            ex.words = [spell_checker.correct(word) for word in ex.words]
+
     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
     train_ys = torch.tensor([ex.label for ex in train_exs])
     
     padded_train_xs = pad_tensor(train_xs)
 
-    vocab_size = len(word_embeddings.vectors)
     embedding_dim = word_embeddings.get_embedding_length()
 
     num_classes = 2
-    ffnn = FFNN(vocab_size, embedding_dim, num_classes, word_embeddings)
+    ffnn = FFNN(embedding_dim, num_classes, word_embeddings)
     optimizer = torch.optim.Adam(ffnn.parameters(), lr=args.lr)
     criterion = nn.NLLLoss()
 
