@@ -137,6 +137,57 @@ class NeuralSentimentClassifier(SentimentClassifier):
         self.wordlist = set(movie_reviews.words())
         self.spell_checker = SpellChecker(self.wordlist)
 
+    def train(self, X_train, y_train, X_dev, y_dev, args):
+        criterion = nn.NLLLoss()
+        optimizer = torch.optim.Adam(self.ffnn.parameters(), lr=args.lr)
+        best_dev_accuracy = 0.0
+        best_model = None
+
+        # logic for patience
+        wait = 0
+        epochs_without_improvement = 2  
+
+        train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=args.batch_size, shuffle=True)
+
+        for epoch in range(0, args.num_epochs):
+            total_loss = 0.0
+            for x_batch, y_batch in train_loader:
+                self.ffnn.zero_grad()
+                probs = self.ffnn(x_batch)
+                loss = criterion(probs, y_batch)
+                loss.backward()
+                total_loss += loss.item()
+                optimizer.step()
+
+            # Evaluate on the dev set at the end of each epoch
+            dev_accuracy = self.evaluate(X_dev, y_dev)
+            print(f"Epoch {epoch}, Loss: {total_loss}, Dev Accuracy: {dev_accuracy}")
+            
+            # Check if the dev accuracy improved
+            if dev_accuracy > best_dev_accuracy:
+                best_dev_accuracy = dev_accuracy
+                best_model = copy.deepcopy(self.ffnn)
+                wait = 0  # reset wait
+            else:
+                wait += 1
+
+            # Break early if we waited for a certain number of epochs without improvement
+            if wait >= epochs_without_improvement:
+                print(f"Breaking due to no improvement after {wait} epochs.")
+                break
+
+        # Once training is done, revert to the best model
+        self.ffnn = best_model
+
+    # evaluate - computes the predictions for X and checks how many match y
+    def evaluate(self, X, y):
+        with torch.no_grad():
+            logits = self.ffnn(X)
+            predicted = torch.argmax(logits, dim=1)
+            correct = (predicted == y).float().sum().item()
+            accuracy = correct / len(y)
+        return accuracy
+
     def predict(self, ex_words, has_typos):
         if has_typos:
             ex_words = [self.spell_checker.correct(word) for word in ex_words]
@@ -170,79 +221,106 @@ def pad_tensor(tensor_list, pad=0):
 spell_checker = SpellChecker()
 
 def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
-    
     # If train_model_for_typo_setting is True, we spell-correct the words in train_exs
     if train_model_for_typo_setting:
         for ex in train_exs:
             ex.words = [spell_checker.correct(word) for word in ex.words]
 
+    # Convert examples to tensor representations
     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
     train_ys = torch.tensor([ex.label for ex in train_exs])
-    
     padded_train_xs = pad_tensor(train_xs)
 
-    embedding_dim = word_embeddings.get_embedding_length()
+    dev_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in dev_exs]
+    dev_ys = torch.tensor([ex.label for ex in dev_exs])
+    padded_dev_xs = pad_tensor(dev_xs)
 
+    # Initialize the FFNN model
+    embedding_dim = word_embeddings.get_embedding_length()
     num_classes = 2
     ffnn = FFNN(embedding_dim, num_classes, word_embeddings)
-    optimizer = torch.optim.Adam(ffnn.parameters(), lr=args.lr)
-    criterion = nn.NLLLoss()
 
-    best_dev_accuracy = 0
-    epoch_improvement_waiting_period = 3
-    wait = 0
+    # Create the NeuralSentimentClassifier and train it
+    classifier = NeuralSentimentClassifier(ffnn, word_embeddings)
+    classifier.train(padded_train_xs, train_ys, padded_dev_xs, dev_ys, args)
 
-    train_dataset = TensorDataset(padded_train_xs, train_ys)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=pad_collate)
+    return classifier
 
-    for epoch in range(0, args.num_epochs):
-        total_loss = 0.0
-        for x, y in train_loader:
-            ffnn.zero_grad()
-            probs = ffnn(x)
-            loss = criterion(probs, y)
-            loss.backward()
-            total_loss += loss.item()
-            optimizer.step()
-        print(f"Epoch {epoch}, Loss: {total_loss}")
 
-        # evaluate the dev set
-        dev_correct = 0
-        for ex in dev_exs:
-            words = [word for word in ex.words]
-            x = torch.tensor([word_embeddings.word_indexer.index_of(word) for word in words]).unsqueeze(0)
-            y = ex.label
-            log_probs = ffnn(x)
-            prediction = torch.argmax(log_probs)
-            if y == prediction:
-                dev_correct += 1
-        dev_accuracy = dev_correct / len(dev_exs)
-        print(f"Epoch {epoch}, Dev Accuracy: {dev_accuracy:.4f}")
-
-        # check for early stopping
-        if dev_accuracy > best_dev_accuracy:
-            best_dev_accuracy = dev_accuracy
-            best_model = copy.deepcopy(ffnn)
-            wait = 0
-        else:
-            wait += 1
-            if wait > epoch_improvement_waiting_period:
-                print("Early stopping triggered.")
-                break
-
-    # use the best model
-    ffnn = best_model
-    train_correct = 0
-    for idx in range(0, len(train_xs)):
-        x = form_input(train_xs[idx])
-        y = train_ys[idx]
-
-        log_probs = ffnn.forward(x)
-
-        prediction = torch.argmax(log_probs)
-        if y == prediction:
-            train_correct += 1
+# def train_deep_averaging_network(args, train_exs, dev_exs, word_embeddings: WordEmbeddings, train_model_for_typo_setting):
     
-    print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
+#     # If train_model_for_typo_setting is True, we spell-correct the words in train_exs
+#     if train_model_for_typo_setting:
+#         for ex in train_exs:
+#             ex.words = [spell_checker.correct(word) for word in ex.words]
 
-    return NeuralSentimentClassifier(ffnn, word_embeddings)
+#     train_xs = [torch.tensor([word_embeddings.word_indexer.index_of(word) for word in ex.words]) for ex in train_exs]
+#     train_ys = torch.tensor([ex.label for ex in train_exs])
+    
+#     padded_train_xs = pad_tensor(train_xs)
+
+#     embedding_dim = word_embeddings.get_embedding_length()
+
+#     num_classes = 2
+#     ffnn = FFNN(embedding_dim, num_classes, word_embeddings)
+#     optimizer = torch.optim.Adam(ffnn.parameters(), lr=args.lr)
+#     criterion = nn.NLLLoss()
+
+#     best_dev_accuracy = 0
+#     epoch_improvement_waiting_period = 3
+#     wait = 0
+
+#     train_dataset = TensorDataset(padded_train_xs, train_ys)
+#     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=pad_collate)
+
+#     for epoch in range(0, args.num_epochs):
+#         total_loss = 0.0
+#         for x, y in train_loader:
+#             ffnn.zero_grad()
+#             probs = ffnn(x)
+#             loss = criterion(probs, y)
+#             loss.backward()
+#             total_loss += loss.item()
+#             optimizer.step()
+#         print(f"Epoch {epoch}, Loss: {total_loss}")
+
+#         # evaluate the dev set
+#         dev_correct = 0
+#         for ex in dev_exs:
+#             words = [word for word in ex.words]
+#             x = torch.tensor([word_embeddings.word_indexer.index_of(word) for word in words]).unsqueeze(0)
+#             y = ex.label
+#             log_probs = ffnn(x)
+#             prediction = torch.argmax(log_probs)
+#             if y == prediction:
+#                 dev_correct += 1
+#         dev_accuracy = dev_correct / len(dev_exs)
+#         print(f"Epoch {epoch}, Dev Accuracy: {dev_accuracy:.4f}")
+
+#         # check for early stopping
+#         if dev_accuracy > best_dev_accuracy:
+#             best_dev_accuracy = dev_accuracy
+#             best_model = copy.deepcopy(ffnn)
+#             wait = 0
+#         else:
+#             wait += 1
+#             if wait > epoch_improvement_waiting_period:
+#                 print("Early stopping triggered.")
+#                 break
+
+#     # use the best model
+#     ffnn = best_model
+#     train_correct = 0
+#     for idx in range(0, len(train_xs)):
+#         x = form_input(train_xs[idx])
+#         y = train_ys[idx]
+
+#         log_probs = ffnn.forward(x)
+
+#         prediction = torch.argmax(log_probs)
+#         if y == prediction:
+#             train_correct += 1
+    
+#     print(repr(train_correct) + "/" + repr(len(train_ys)) + " correct after training")
+
+#     return NeuralSentimentClassifier(ffnn, word_embeddings)
