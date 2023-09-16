@@ -27,7 +27,7 @@ class DeepAveragingNetwork(nn.Module):
             param.requires_grad = False
 
         # hidden layer
-        hidden_layer_size = 225
+        hidden_layer_size = 240
         self.hidden = nn.Linear(embedding_dimension, hidden_layer_size)
         nn.init.xavier_uniform_(self.hidden.weight)  # xavier glorot weight initialization for hidden layer
 
